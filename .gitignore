@@ -1,0 +1,8 @@
+.vs/
+**/bin/
+**/obj/
+artifacts/
+release-*/
+certs/
+*.pfx
+NetSpeed/ThirdParty/LibreSpeed/librespeed-cli.exe

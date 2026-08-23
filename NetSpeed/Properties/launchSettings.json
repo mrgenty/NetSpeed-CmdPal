@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "NetSpeed": {
+      "commandName": "Project",
+      "commandLineArgs": "-RegisterProcessAsComServer"
+    }
+  }
+}

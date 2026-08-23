@@ -1,0 +1,9 @@
+Project: NetSpeed for PowerToys Command Palette
+Version: 0.1.0
+Developer: Michele Gentilini
+Developer website: https://genty.me
+Speed-test engine: LibreSpeed CLI 1.0.13
+NetSpeed license: MIT
+LibreSpeed CLI license: LGPL-3.0
+Command Palette package identity: MicheleGentilini.NetSpeed.CmdPal
+COM CLSID: C71F961F-3B9A-4380-B42C-7E5712AEE055

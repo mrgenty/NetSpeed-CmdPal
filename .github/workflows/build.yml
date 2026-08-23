@@ -1,0 +1,97 @@
+name: Build NetSpeed
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, ARM64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Prepare LibreSpeed CLI
+        shell: pwsh
+        run: .\scripts\Prepare-LibreSpeed.ps1 -Architecture "${{ matrix.architecture }}"
+
+      - name: Prepare signing certificate
+        shell: pwsh
+        env:
+          CODESIGN_PFX_BASE64: ${{ secrets.CODESIGN_PFX_BASE64 }}
+          CODESIGN_PFX_PASSWORD: ${{ secrets.CODESIGN_PFX_PASSWORD }}
+        run: |
+          New-Item -ItemType Directory -Force -Path certs | Out-Null
+
+          if ($env:CODESIGN_PFX_BASE64 -and $env:CODESIGN_PFX_PASSWORD) {
+            Write-Host "Using persistent signing certificate from GitHub Secrets."
+            [IO.File]::WriteAllBytes("certs\NetSpeed.pfx", [Convert]::FromBase64String($env:CODESIGN_PFX_BASE64))
+            "CI_CERT_PASSWORD=$env:CODESIGN_PFX_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+            $password = ConvertTo-SecureString $env:CODESIGN_PFX_PASSWORD -AsPlainText -Force
+            $cert = Get-PfxCertificate -FilePath "certs\NetSpeed.pfx" -Password $password
+            Export-Certificate -Cert $cert -FilePath "certs\NetSpeed.cer" | Out-Null
+          }
+          else {
+            Write-Warning "No persistent signing certificate configured. Creating a temporary development certificate for this build."
+            $passwordPlain = [Guid]::NewGuid().ToString("N")
+            $password = ConvertTo-SecureString -String $passwordPlain -Force -AsPlainText
+            $cert = New-SelfSignedCertificate `
+              -Type CodeSigningCert `
+              -Subject "CN=Michele Gentilini" `
+              -FriendlyName "NetSpeed CI Development" `
+              -CertStoreLocation "Cert:\CurrentUser\My"
+            Export-PfxCertificate -Cert $cert -FilePath "certs\NetSpeed.pfx" -Password $password | Out-Null
+            Export-Certificate -Cert $cert -FilePath "certs\NetSpeed.cer" | Out-Null
+            "CI_CERT_PASSWORD=$passwordPlain" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore .\NetSpeed.sln -p:Platform=${{ matrix.architecture }}
+
+      - name: Build signed MSIX
+        shell: pwsh
+        run: |
+          $pfx = (Resolve-Path .\certs\NetSpeed.pfx).Path
+          $out = Join-Path $env:GITHUB_WORKSPACE "artifacts\${{ matrix.architecture }}\"
+          dotnet build .\NetSpeed.sln `
+            --configuration Release `
+            -p:Platform=${{ matrix.architecture }} `
+            -p:GenerateAppxPackageOnBuild=true `
+            -p:AppxBundle=Never `
+            -p:AppxPackageDir="$out" `
+            -p:AppxPackageSigningEnabled=true `
+            -p:PackageCertificateKeyFile="$pfx" `
+            -p:PackageCertificatePassword="$env:CI_CERT_PASSWORD"
+
+      - name: Collect artifact
+        shell: pwsh
+        run: |
+          $release = ".\release-${{ matrix.architecture }}"
+          New-Item -ItemType Directory -Force -Path $release | Out-Null
+          Get-ChildItem ".\artifacts\${{ matrix.architecture }}" -Recurse -Include *.msix,*.msixbundle | Copy-Item -Destination $release
+          Copy-Item .\certs\NetSpeed.cer "$release\NetSpeed.cer"
+          Copy-Item .\scripts\Install-Package.ps1 "$release\Install-Package.ps1"
+          Copy-Item .\THIRD_PARTY_NOTICES.md "$release\THIRD_PARTY_NOTICES.md"
+          Copy-Item .\NetSpeed\ThirdParty\LibreSpeed\LICENSE-LGPL-3.0.txt "$release\LibreSpeed-LICENSE-LGPL-3.0.txt"
+          Get-ChildItem $release
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSpeed-${{ matrix.architecture }}
+          path: release-${{ matrix.architecture }}/
+          if-no-files-found: error

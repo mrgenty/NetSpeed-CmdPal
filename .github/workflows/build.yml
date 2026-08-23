@@ -21,6 +21,10 @@ jobs:
     name: Build ${{ matrix.platform }}
     runs-on: windows-latest
 
+    env:
+      PFX_BASE64: ${{ secrets.NETSPEED_PFX_BASE64 }}
+      PFX_PASSWORD: ${{ secrets.NETSPEED_PFX_PASSWORD }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -28,21 +32,26 @@ jobs:
           - platform: x64
             runtime: win-x64
             librespeed_arch: amd64
+
           - platform: ARM64
             runtime: win-arm64
             librespeed_arch: arm64
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Restore
+      - name: Restore NuGet packages
         run: dotnet restore "${{ env.PROJECT_PATH }}"
+
+      # ------------------------------------------------------------
+      # LibreSpeed CLI
+      # ------------------------------------------------------------
 
       - name: Download LibreSpeed CLI
         shell: pwsh
@@ -56,7 +65,8 @@ jobs:
           $zipUrl = "$baseUrl/$file"
           $checksumsUrl = "$baseUrl/checksums.txt"
 
-          Write-Host "Downloading $zipUrl"
+          Write-Host "Downloading LibreSpeed CLI:"
+          Write-Host $zipUrl
 
           Invoke-WebRequest `
             -Uri $zipUrl `
@@ -86,17 +96,29 @@ jobs:
 
           $target = "NetSpeed\ThirdParty\LibreSpeed"
 
+          Remove-Item `
+            -Path $target `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+
           New-Item `
             -ItemType Directory `
             -Force `
-            -Path $target | Out-Null
+            -Path $target |
+            Out-Null
 
           Expand-Archive `
             -Path $file `
             -DestinationPath $target `
             -Force
 
+          Write-Host "LibreSpeed files:"
           Get-ChildItem $target -Recurse
+
+      # ------------------------------------------------------------
+      # Build MSIX unsigned
+      # ------------------------------------------------------------
 
       - name: Build MSIX
         shell: pwsh
@@ -108,14 +130,14 @@ jobs:
             -p:GenerateAppxPackageOnBuild=true `
             -p:AppxPackageSigningEnabled=false
 
-      - name: Find MSIX
+      - name: Find generated MSIX
         id: package
         shell: pwsh
         run: |
           $msix = Get-ChildItem `
             -Path . `
             -Recurse `
-            -Include *.msix `
+            -Filter "*.msix" `
             -File |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
@@ -124,54 +146,60 @@ jobs:
             throw "No MSIX package found."
           }
 
-          Write-Host "Found MSIX: $($msix.FullName)"
+          Write-Host "MSIX found:"
+          Write-Host $msix.FullName
 
           "path=$($msix.FullName)" >> $env:GITHUB_OUTPUT
-          "name=$($msix.Name)" >> $env:GITHUB_OUTPUT
 
-      # ---------------------------------------------------------
-      # RELEASE SIGNING
+      # ------------------------------------------------------------
+      # Signing certificate
       #
-      # For tagged releases a persistent PFX is REQUIRED.
+      # RELEASE:
+      # Persistent PFX is mandatory.
       #
-      # Repository secrets:
-      #
-      # NETSPEED_PFX_BASE64
-      # NETSPEED_PFX_PASSWORD
-      # ---------------------------------------------------------
+      # NORMAL CI BUILD:
+      # If no persistent PFX exists, generate a temporary certificate.
+      # ------------------------------------------------------------
 
-      - name: Require persistent signing certificate for releases
+      - name: Verify release signing secrets
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
-        env:
-          PFX_BASE64: ${{ secrets.NETSPEED_PFX_BASE64 }}
-          PFX_PASSWORD: ${{ secrets.NETSPEED_PFX_PASSWORD }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:PFX_BASE64)) {
-            throw "NETSPEED_PFX_BASE64 is required for tagged releases."
+            throw "NETSPEED_PFX_BASE64 is missing. Tagged releases require the persistent signing certificate."
           }
 
           if ([string]::IsNullOrWhiteSpace($env:PFX_PASSWORD)) {
-            throw "NETSPEED_PFX_PASSWORD is required for tagged releases."
+            throw "NETSPEED_PFX_PASSWORD is missing. Tagged releases require the PFX password."
           }
 
-      - name: Prepare persistent certificate
-        if: ${{ secrets.NETSPEED_PFX_BASE64 != '' }}
+          Write-Host "Persistent signing certificate configured."
+
+      - name: Restore persistent signing certificate
+        if: env.PFX_BASE64 != ''
         shell: pwsh
-        env:
-          PFX_BASE64: ${{ secrets.NETSPEED_PFX_BASE64 }}
-          PFX_PASSWORD: ${{ secrets.NETSPEED_PFX_PASSWORD }}
         run: |
-          $bytes = [Convert]::FromBase64String($env:PFX_BASE64)
-          $pfxPath = Join-Path $env:RUNNER_TEMP "NetSpeed.pfx"
+          $pfxPath = Join-Path $env:RUNNER_TEMP "NetSpeed-CodeSigning.pfx"
+
+          try {
+            $bytes = [Convert]::FromBase64String($env:PFX_BASE64)
+          }
+          catch {
+            throw "NETSPEED_PFX_BASE64 does not contain valid Base64."
+          }
 
           [IO.File]::WriteAllBytes($pfxPath, $bytes)
 
-          "NETSPEED_PFX_PATH=$pfxPath" >> $env:GITHUB_ENV
-          "NETSPEED_CERT_PASSWORD=$env:PFX_PASSWORD" >> $env:GITHUB_ENV
+          if (-not (Test-Path $pfxPath)) {
+            throw "Could not reconstruct PFX."
+          }
 
-      - name: Create temporary development certificate
-        if: ${{ secrets.NETSPEED_PFX_BASE64 == '' && !startsWith(github.ref, 'refs/tags/') }}
+          Write-Host "Persistent PFX restored."
+
+          "SIGNING_PFX=$pfxPath" >> $env:GITHUB_ENV
+
+      - name: Create temporary CI certificate
+        if: env.PFX_BASE64 == '' && !startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           [xml]$manifest = Get-Content "NetSpeed\Package.appxmanifest"
@@ -179,76 +207,92 @@ jobs:
           $publisher = $manifest.Package.Identity.Publisher
 
           if ([string]::IsNullOrWhiteSpace($publisher)) {
-            throw "Unable to read Publisher from Package.appxmanifest."
+            throw "Unable to determine Publisher from Package.appxmanifest."
           }
 
-          Write-Host "Creating temporary certificate for:"
+          Write-Host "Creating temporary CI certificate for:"
           Write-Host $publisher
 
-          $passwordText = [Guid]::NewGuid().ToString("N") + "Aa1!"
-          $password = ConvertTo-SecureString `
-            $passwordText `
+          $temporaryPassword = [Guid]::NewGuid().ToString("N") + "Aa1!"
+
+          $securePassword = ConvertTo-SecureString `
+            $temporaryPassword `
             -AsPlainText `
             -Force
 
           $cert = New-SelfSignedCertificate `
             -Type Custom `
             -Subject $publisher `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
             -KeyUsage DigitalSignature `
-            -FriendlyName "NetSpeed GitHub Actions Development" `
+            -FriendlyName "NetSpeed Temporary CI Certificate" `
             -CertStoreLocation "Cert:\CurrentUser\My" `
             -TextExtension @(
               "2.5.29.37={text}1.3.6.1.5.5.7.3.3"
             )
 
-          $pfxPath = Join-Path $env:RUNNER_TEMP "NetSpeed-development.pfx"
-          $cerPath = Join-Path $env:RUNNER_TEMP "NetSpeed-development.cer"
+          $pfxPath = Join-Path $env:RUNNER_TEMP "NetSpeed-Temporary.pfx"
+          $cerPath = Join-Path $env:RUNNER_TEMP "NetSpeed-Temporary.cer"
 
           Export-PfxCertificate `
             -Cert $cert `
             -FilePath $pfxPath `
-            -Password $password | Out-Null
+            -Password $securePassword |
+            Out-Null
 
           Export-Certificate `
             -Cert $cert `
-            -FilePath $cerPath | Out-Null
+            -FilePath $cerPath |
+            Out-Null
 
-          "NETSPEED_PFX_PATH=$pfxPath" >> $env:GITHUB_ENV
-          "NETSPEED_CERT_PASSWORD=$passwordText" >> $env:GITHUB_ENV
-          "NETSPEED_CER_PATH=$cerPath" >> $env:GITHUB_ENV
+          "SIGNING_PFX=$pfxPath" >> $env:GITHUB_ENV
+          "SIGNING_PASSWORD=$temporaryPassword" >> $env:GITHUB_ENV
+          "PUBLIC_CERT=$cerPath" >> $env:GITHUB_ENV
 
-      - name: Export public certificate from persistent PFX
-        if: ${{ secrets.NETSPEED_PFX_BASE64 != '' }}
+      - name: Configure persistent PFX password
+        if: env.PFX_BASE64 != ''
         shell: pwsh
         run: |
-          $password = ConvertTo-SecureString `
-            $env:NETSPEED_CERT_PASSWORD `
-            -AsPlainText `
-            -Force
+          "SIGNING_PASSWORD=$env:PFX_PASSWORD" >> $env:GITHUB_ENV
 
+      # ------------------------------------------------------------
+      # Export .CER from persistent PFX
+      # ------------------------------------------------------------
+
+      - name: Export public certificate
+        if: env.PFX_BASE64 != ''
+        shell: pwsh
+        run: |
           $cert = New-Object `
             System.Security.Cryptography.X509Certificates.X509Certificate2(
-              $env:NETSPEED_PFX_PATH,
-              $env:NETSPEED_CERT_PASSWORD
+              $env:SIGNING_PFX,
+              $env:PFX_PASSWORD
             )
 
           $cerPath = Join-Path $env:RUNNER_TEMP "NetSpeed.cer"
 
-          [IO.File]::WriteAllBytes(
-            $cerPath,
-            $cert.Export(
-              [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert
-            )
+          $bytes = $cert.Export(
+            [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert
           )
 
-          "NETSPEED_CER_PATH=$cerPath" >> $env:GITHUB_ENV
+          [IO.File]::WriteAllBytes($cerPath, $bytes)
+
+          Write-Host "Public certificate exported."
+
+          "PUBLIC_CERT=$cerPath" >> $env:GITHUB_ENV
+
+      # ------------------------------------------------------------
+      # SignTool
+      # ------------------------------------------------------------
 
       - name: Locate SignTool
         shell: pwsh
         run: |
           $signtool = Get-ChildItem `
             "C:\Program Files (x86)\Windows Kits\10\bin" `
-            -Filter signtool.exe `
+            -Filter "signtool.exe" `
             -Recurse `
             -ErrorAction SilentlyContinue |
             Where-Object {
@@ -261,7 +305,8 @@ jobs:
             throw "signtool.exe not found."
           }
 
-          Write-Host "Using $($signtool.FullName)"
+          Write-Host "Using SignTool:"
+          Write-Host $signtool.FullName
 
           "SIGNTOOL=$($signtool.FullName)" >> $env:GITHUB_ENV
 
@@ -270,15 +315,15 @@ jobs:
         run: |
           & "$env:SIGNTOOL" sign `
             /fd SHA256 `
-            /f "$env:NETSPEED_PFX_PATH" `
-            /p "$env:NETSPEED_CERT_PASSWORD" `
+            /f "$env:SIGNING_PFX" `
+            /p "$env:SIGNING_PASSWORD" `
             "${{ steps.package.outputs.path }}"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "SignTool failed."
+            throw "MSIX signing failed."
           }
 
-      - name: Verify signature
+      - name: Verify MSIX signature
         shell: pwsh
         run: |
           & "$env:SIGNTOOL" verify `
@@ -290,7 +335,11 @@ jobs:
             throw "MSIX signature verification failed."
           }
 
-      - name: Prepare distribution files
+      # ------------------------------------------------------------
+      # Distribution files
+      # ------------------------------------------------------------
+
+      - name: Prepare distribution
         shell: pwsh
         run: |
           $dist = "dist\${{ matrix.platform }}"
@@ -298,14 +347,17 @@ jobs:
           New-Item `
             -ItemType Directory `
             -Force `
-            -Path $dist | Out-Null
+            -Path $dist |
+            Out-Null
+
+          $outputName = "NetSpeed_${{ matrix.platform }}.msix"
 
           Copy-Item `
             "${{ steps.package.outputs.path }}" `
-            "$dist\NetSpeed_${{ matrix.platform }}.msix"
+            "$dist\$outputName"
 
           Copy-Item `
-            "$env:NETSPEED_CER_PATH" `
+            "$env:PUBLIC_CERT" `
             "$dist\NetSpeed.cer"
 
           @'
@@ -320,20 +372,30 @@ jobs:
           if (-not $PackagePath) {
               $PackagePath = Get-ChildItem `
                   -Path $scriptDir `
-                  -Filter "*.msix" |
+                  -Filter "*.msix" `
+                  -File |
                   Select-Object -First 1 -ExpandProperty FullName
+          }
+
+          if (-not $PackagePath) {
+              throw "MSIX package not found."
           }
 
           $certificatePath = Join-Path $scriptDir "NetSpeed.cer"
 
-          Write-Host "Installing NetSpeed certificate..."
+          if (-not (Test-Path $certificatePath)) {
+              throw "NetSpeed.cer not found."
+          }
+
+          Write-Host "Installing NetSpeed signing certificate..."
 
           Import-Certificate `
               -FilePath $certificatePath `
               -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" |
               Out-Null
 
-          Write-Host "Installing $PackagePath..."
+          Write-Host "Installing:"
+          Write-Host $PackagePath
 
           Add-AppxPackage -Path $PackagePath
 
@@ -343,13 +405,25 @@ jobs:
             "$dist\Install-Package.ps1" `
             -Encoding UTF8
 
-      - name: Upload CI artifact
+          Write-Host "Distribution contents:"
+          Get-ChildItem $dist
+
+      # ------------------------------------------------------------
+      # CI artifacts
+      # ------------------------------------------------------------
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: NetSpeed-${{ matrix.platform }}
           path: dist/${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 14
+
+  # ==============================================================
+  # GitHub Release
+  # Runs ONLY for tags such as v0.1.2
+  # ==============================================================
 
   release:
     name: Create GitHub Release
@@ -360,40 +434,54 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v5
+      - name: Download x64 artifact
+        uses: actions/download-artifact@v4
         with:
-          pattern: NetSpeed-*
-          path: release-assets
-          merge-multiple: true
+          name: NetSpeed-x64
+          path: release-assets/x64
 
-      - name: Show release files
-        run: find release-assets -type f -maxdepth 2 -print
+      - name: Download ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: NetSpeed-ARM64
+          path: release-assets/arm64
 
-      - name: Rename release files with tag version
+      - name: Prepare release assets
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
 
-          if [ -f "release-assets/NetSpeed_x64.msix" ]; then
-            mv \
-              "release-assets/NetSpeed_x64.msix" \
-              "release-assets/NetSpeed_${VERSION}_x64.msix"
-          fi
+          mkdir -p final-release
 
-          if [ -f "release-assets/NetSpeed_ARM64.msix" ]; then
-            mv \
-              "release-assets/NetSpeed_ARM64.msix" \
-              "release-assets/NetSpeed_${VERSION}_arm64.msix"
-          fi
+          cp \
+            "release-assets/x64/NetSpeed_x64.msix" \
+            "final-release/NetSpeed_${VERSION}_x64.msix"
+
+          cp \
+            "release-assets/arm64/NetSpeed_ARM64.msix" \
+            "final-release/NetSpeed_${VERSION}_arm64.msix"
+
+          cp \
+            "release-assets/x64/NetSpeed.cer" \
+            "final-release/NetSpeed.cer"
+
+          cp \
+            "release-assets/x64/Install-Package.ps1" \
+            "final-release/Install-Package.ps1"
+
+          echo "Release assets:"
+          ls -lah final-release
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            release-assets/*.msix \
-            release-assets/NetSpeed.cer \
+            final-release/NetSpeed_${GITHUB_REF_NAME#v}_x64.msix \
+            final-release/NetSpeed_${GITHUB_REF_NAME#v}_arm64.msix \
+            final-release/NetSpeed.cer \
+            final-release/Install-Package.ps1 \
             --repo "${GITHUB_REPOSITORY}" \
             --title "NetSpeed ${GITHUB_REF_NAME}" \
             --generate-notes

@@ -4,8 +4,6 @@ A compact Internet speed test extension for **Microsoft PowerToys Command Palett
 
 NetSpeed runs a speed test on demand and shows the result directly inside Command Palette: download, upload, latency, jitter, selected server, ISP and transferred data.
 
-**Developer:** Michele Gentilini  
-**Website:** https://genty.me
 
 ## Features
 
@@ -54,35 +52,6 @@ For ARM64:
 ```powershell
 .\scripts\Prepare-LibreSpeed.ps1 -Architecture ARM64
 ```
-
-## GitHub Actions
-
-The included workflow builds both **x64** and **ARM64**.
-
-1. Push the repository to GitHub.
-2. Open **Actions → Build NetSpeed**.
-3. Run the workflow or push to `main`/`master`.
-4. Download `NetSpeed-x64` or `NetSpeed-ARM64` from the workflow artifacts.
-
-Each artifact contains the MSIX, public signing certificate, installation script and third-party notices.
-
-### Development signing
-
-If signing secrets are not configured, CI creates a temporary self-signed certificate with subject:
-
-```text
-CN=Michele Gentilini
-```
-
-Run `Install-Package.ps1` **as Administrator**. It imports the public certificate into `LocalMachine\TrustedPeople` and installs the MSIX.
-
-For public releases, use a persistent code-signing certificate or Microsoft Store identity. See `docs/PUBLISHING.md`.
-
-## Publishing
-
-Microsoft supports distribution through **WinGet** and the **Microsoft Store**. A WinGet listing intended for Command Palette discovery must include the `windows-commandpalette-extension` tag. The curated Command Palette Gallery links users to the WinGet or Store install source.
-
-See `docs/PUBLISHING.md` for notes specific to this project.
 
 ## Privacy
 

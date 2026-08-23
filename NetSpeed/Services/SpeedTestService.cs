@@ -66,17 +66,37 @@ internal sealed class SpeedTestService
             throw new InvalidOperationException("LibreSpeed CLI returned an empty result.");
         }
 
-        LibreSpeedResult? result;
+        return ParseResult(stdout);
+    }
+
+    private static LibreSpeedResult ParseResult(string json)
+    {
         try
         {
-            result = JsonSerializer.Deserialize(stdout, NetSpeedJsonContext.Default.LibreSpeedResult);
+            using JsonDocument document = JsonDocument.Parse(json);
+            JsonElement root = document.RootElement;
+
+            // LibreSpeed CLI 1.0.13 emits a JSON array even when only one
+            // server is tested. Older/alternate builds may emit one object,
+            // so accept both shapes.
+            JsonElement resultElement = root.ValueKind switch
+            {
+                JsonValueKind.Array when root.GetArrayLength() > 0 => root[0],
+                JsonValueKind.Object => root,
+                JsonValueKind.Array => throw new InvalidOperationException("LibreSpeed CLI returned an empty result array."),
+                _ => throw new InvalidOperationException("LibreSpeed CLI returned an unsupported JSON structure."),
+            };
+
+            LibreSpeedResult? result = JsonSerializer.Deserialize(
+                resultElement,
+                NetSpeedJsonContext.Default.LibreSpeedResult);
+
+            return result ?? throw new InvalidOperationException("LibreSpeed CLI returned no usable result.");
         }
         catch (JsonException ex)
         {
             throw new InvalidOperationException("LibreSpeed CLI returned invalid JSON.", ex);
         }
-
-        return result ?? throw new InvalidOperationException("LibreSpeed CLI returned no usable result.");
     }
 
     private static void TryKill(Process process)

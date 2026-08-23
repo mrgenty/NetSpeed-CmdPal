@@ -93,3 +93,7 @@ NetSpeed has no proprietary analytics or telemetry service. A speed test necessa
 NetSpeed source code: **MIT License**, copyright © 2026 Michele Gentilini.
 
 LibreSpeed CLI: **LGPL-3.0**, distributed as a separate executable in built packages. See `THIRD_PARTY_NOTICES.md` and `NetSpeed/ThirdParty/LibreSpeed/LICENSE-LGPL-3.0.txt`.
+
+## Changelog
+
+See `CHANGELOG.md`. Version 0.1.1 fixes LibreSpeed CLI 1.0.13 JSON-array parsing.

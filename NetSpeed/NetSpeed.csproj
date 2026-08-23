@@ -17,7 +17,7 @@
 
     <AppxPackageIdentityName>MicheleGentilini.NetSpeed.CmdPal</AppxPackageIdentityName>
     <AppxPackagePublisher>CN=Michele Gentilini</AppxPackagePublisher>
-    <AppxPackageVersion>0.1.0.0</AppxPackageVersion>
+    <AppxPackageVersion>0.1.1.0</AppxPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>

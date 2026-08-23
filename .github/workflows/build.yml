@@ -60,14 +60,12 @@ jobs:
         run: |
           $version = "${{ env.LIBRESPEED_VERSION }}"
           $arch = "${{ matrix.librespeed_arch }}"
-
           $file = "librespeed-cli_${version}_windows_${arch}.zip"
           $baseUrl = "https://github.com/librespeed/speedtest-cli/releases/download/v${version}"
           $zipUrl = "$baseUrl/$file"
           $checksumsUrl = "$baseUrl/checksums.txt"
 
           Write-Host "Downloading LibreSpeed CLI $version for $arch"
-
           Invoke-WebRequest -Uri $zipUrl -OutFile $file
           Invoke-WebRequest -Uri $checksumsUrl -OutFile "checksums.txt"
 
@@ -90,10 +88,8 @@ jobs:
           }
 
           $target = "NetSpeed\ThirdParty\LibreSpeed"
-
           Remove-Item -Path $target -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $target | Out-Null
-
           Expand-Archive -Path $file -DestinationPath $target -Force
 
           Invoke-WebRequest `
@@ -104,7 +100,6 @@ jobs:
             throw "LibreSpeed license was not downloaded."
           }
 
-          Write-Host "LibreSpeed files:"
           Get-ChildItem -Path $target -Recurse | Select-Object FullName, Length
 
       - name: Build MSIX
@@ -128,11 +123,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $msix = Get-ChildItem `
-            -Path . `
-            -Recurse `
-            -Filter "*.msix" `
-            -File |
+          $msix = Get-ChildItem -Path . -Recurse -Filter "*.msix" -File |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
 
@@ -151,11 +142,9 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:PFX_BASE64)) {
             throw "NETSPEED_PFX_BASE64 is missing."
           }
-
           if ([string]::IsNullOrWhiteSpace($env:PFX_PASSWORD)) {
             throw "NETSPEED_PFX_PASSWORD is missing."
           }
-
           Write-Host "Persistent release signing certificate configured."
 
       - name: Restore persistent signing certificate
@@ -189,7 +178,6 @@ jobs:
 
           Write-Host "Certificate subject: $($testCert.Subject)"
           Write-Host "Certificate thumbprint: $($testCert.Thumbprint)"
-
           "SIGNING_PFX=$pfxPath" >> $env:GITHUB_ENV
           "SIGNING_PASSWORD=$env:PFX_PASSWORD" >> $env:GITHUB_ENV
 
@@ -199,7 +187,6 @@ jobs:
         run: |
           [xml]$manifest = Get-Content "NetSpeed\Package.appxmanifest"
           $publisher = $manifest.Package.Identity.Publisher
-
           $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
             $env:SIGNING_PFX,
             $env:SIGNING_PASSWORD
@@ -220,12 +207,10 @@ jobs:
             $env:SIGNING_PFX,
             $env:SIGNING_PASSWORD
           )
-
           $cerPath = Join-Path $env:RUNNER_TEMP "NetSpeed.cer"
           $certBytes = $cert.Export(
             [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert
           )
-
           [IO.File]::WriteAllBytes($cerPath, $certBytes)
           "PUBLIC_CERT=$cerPath" >> $env:GITHUB_ENV
 
@@ -308,7 +293,6 @@ jobs:
           $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
             $env:PUBLIC_CERT
           )
-
           $thumbprint = $cert.Thumbprint
 
           Write-Host "Subject: $($cert.Subject)"
@@ -376,8 +360,6 @@ jobs:
                 foreach ($match in $matches) {
                   $store.Remove($match)
                 }
-
-                Write-Host "Removed certificate from CurrentUser\$storeName"
               }
               catch {
                 Write-Warning "Could not remove certificate from CurrentUser\$storeName"
@@ -392,12 +374,10 @@ jobs:
         shell: pwsh
         run: |
           $dist = "dist\${{ matrix.platform }}"
-
           Remove-Item -Path $dist -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
           $outputName = "NetSpeed_${{ matrix.platform }}.msix"
-
           Copy-Item "${{ steps.package.outputs.path }}" "$dist\$outputName"
           Copy-Item "$env:PUBLIC_CERT" "$dist\NetSpeed.cer"
 
@@ -422,7 +402,6 @@ jobs:
           }
 
           $certificatePath = Join-Path $scriptDir "NetSpeed.cer"
-
           if (-not (Test-Path $certificatePath)) {
               throw "NetSpeed.cer not found."
           }
@@ -441,7 +420,6 @@ jobs:
           }
 
           Write-Host "Installing NetSpeed signing certificate..."
-
           Import-Certificate `
               -FilePath $certificatePath `
               -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" |
@@ -486,16 +464,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           VERSION="${GITHUB_REF_NAME#v}"
-
           mkdir -p final-release
-
           cp "release-assets/x64/NetSpeed_x64.msix" "final-release/NetSpeed_${VERSION}_x64.msix"
           cp "release-assets/arm64/NetSpeed_ARM64.msix" "final-release/NetSpeed_${VERSION}_arm64.msix"
           cp "release-assets/x64/NetSpeed.cer" "final-release/NetSpeed.cer"
           cp "release-assets/x64/Install-Package.ps1" "final-release/Install-Package.ps1"
-
           ls -lah final-release
 
       - name: Create GitHub Release
@@ -504,14 +478,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           VERSION="${GITHUB_REF_NAME#v}"
-
-          gh release create "${GITHUB_REF_NAME}" `
-            "final-release/NetSpeed_${VERSION}_x64.msix" `
-            "final-release/NetSpeed_${VERSION}_arm64.msix" `
-            "final-release/NetSpeed.cer" `
-            "final-release/Install-Package.ps1" `
-            --repo "${GITHUB_REPOSITORY}" `
-            --title "NetSpeed ${GITHUB_REF_NAME}" `
+          gh release create "${GITHUB_REF_NAME}" \
+            "final-release/NetSpeed_${VERSION}_x64.msix" \
+            "final-release/NetSpeed_${VERSION}_arm64.msix" \
+            "final-release/NetSpeed.cer" \
+            "final-release/Install-Package.ps1" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "NetSpeed ${GITHUB_REF_NAME}" \
             --generate-notes

@@ -1,0 +1,166 @@
+name: NetSpeed Signed Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (x.y.z)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  PROJECT_PATH: "NetSpeed/NetSpeed.csproj"
+  LIBRESPEED_VERSION: "1.0.13"
+
+jobs:
+  release:
+    name: Signed Release ${{ matrix.platform }}
+    runs-on: windows-2025
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            runtime: win-x64
+            librespeed_arch: amd64
+          - platform: ARM64
+            runtime: win-arm64
+            librespeed_arch: arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Validate version
+        shell: pwsh
+        run: |
+          if ('${{ inputs.version }}' -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Version must use x.y.z format.'
+          }
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore and audit NuGet packages
+        shell: pwsh
+        run: |
+          dotnet restore "${{ env.PROJECT_PATH }}" -p:NuGetAuditMode=all -warnaserror:NU1901,NU1902,NU1903,NU1904
+          if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed." }
+
+      - name: Download and verify LibreSpeed CLI
+        shell: pwsh
+        run: |
+          $version = "${{ env.LIBRESPEED_VERSION }}"
+          $arch = "${{ matrix.librespeed_arch }}"
+          $file = "librespeed-cli_${version}_windows_${arch}.zip"
+          $baseUrl = "https://github.com/librespeed/speedtest-cli/releases/download/v${version}"
+
+          Invoke-WebRequest -Uri "$baseUrl/$file" -OutFile $file
+          Invoke-WebRequest -Uri "$baseUrl/checksums.txt" -OutFile "checksums.txt"
+
+          $checksumLine = Get-Content "checksums.txt" | Where-Object { $_ -match [regex]::Escape($file) } | Select-Object -First 1
+          if (-not $checksumLine) { throw "Checksum for $file not found." }
+
+          $expected = ($checksumLine -split '\s+')[0].Trim().ToLowerInvariant()
+          $actual = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "LibreSpeed CLI checksum mismatch." }
+
+          $target = "NetSpeed\ThirdParty\LibreSpeed"
+          Remove-Item -Path $target -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          Expand-Archive -Path $file -DestinationPath $target -Force
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/librespeed/speedtest-cli/v${version}/LICENSE" -OutFile "$target\LICENSE-LGPL-3.0.txt"
+
+      - name: Validate signing configuration
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          $required = @(
+            'AZURE_TENANT_ID',
+            'AZURE_CLIENT_ID',
+            'AZURE_CLIENT_SECRET',
+            'AZURE_ARTIFACT_SIGNING_ENDPOINT',
+            'AZURE_ARTIFACT_SIGNING_ACCOUNT',
+            'AZURE_ARTIFACT_SIGNING_PROFILE'
+          )
+          $missing = $required | Where-Object { [string]::IsNullOrWhiteSpace((Get-Item "Env:$_" -ErrorAction SilentlyContinue).Value) }
+          if ($missing) { throw "Missing Azure Artifact Signing configuration: $($missing -join ', ')" }
+
+      - name: Build Release MSIX
+        shell: pwsh
+        run: |
+          $appxVersion = '${{ inputs.version }}.0'
+          dotnet publish "${{ env.PROJECT_PATH }}" `
+            -c Release `
+            -p:Platform=${{ matrix.platform }} `
+            -r ${{ matrix.runtime }} `
+            -p:GenerateAppxPackageOnBuild=true `
+            -p:AppxPackageSigningEnabled=false `
+            -p:AppxPackageVersion=$appxVersion
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
+
+      - name: Find generated MSIX
+        id: package
+        shell: pwsh
+        run: |
+          $msix = Get-ChildItem -Path . -Recurse -Filter "*.msix" -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) { throw "No MSIX package was generated." }
+          "path=$($msix.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Sign MSIX with Azure Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ steps.package.outputs.path }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: NetSpeed for PowerToys Command Palette
+          description-url: https://github.com/mrgenty/NetSpeed-CmdPal
+
+      - name: Verify signed MSIX
+        shell: pwsh
+        run: |
+          $package = "${{ steps.package.outputs.path }}"
+          $signature = Get-AuthenticodeSignature -LiteralPath $package
+          $signature | Format-List Status,StatusMessage,SignerCertificate,TimeStamperCertificate
+          if ($signature.Status -ne 'Valid') {
+            throw "Authenticode verification failed: $($signature.Status) - $($signature.StatusMessage)"
+          }
+
+      - name: Prepare release file
+        id: output
+        shell: pwsh
+        run: |
+          $out = "dist"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $file = "NetSpeed-${{ inputs.version }}-${{ matrix.platform }}.msix"
+          Copy-Item "${{ steps.package.outputs.path }}" "$out\$file"
+          Get-FileHash "$out\$file" -Algorithm SHA256 | Format-List
+          "path=$out\$file" >> $env:GITHUB_OUTPUT
+
+      - name: Upload signed release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSpeed-${{ inputs.version }}-${{ matrix.platform }}
+          path: ${{ steps.output.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90

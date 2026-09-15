@@ -17,8 +17,7 @@ NetSpeed runs a speed test on demand and shows the result directly inside Comman
 - No NetSpeed telemetry
 - No automatic test on launch: bandwidth is used only after the user explicitly starts a test
 - x64 and ARM64 build configuration
-- Signed MSIX artifacts from GitHub Actions
-- Persistent signing certificate support through GitHub Secrets
+- Release MSIX packages digitally signed with Microsoft Artifact Signing (Public Trust)
 
 ## Speed-test engine
 
@@ -36,6 +35,19 @@ See `THIRD_PARTY_NOTICES.md` for licensing details.
 - PowerToys with Command Palette
 - .NET 10 SDK / Visual Studio with the Windows development workload for local builds
 - Internet access during dependency preparation and speed testing
+
+## Installation
+
+Download the MSIX package for your architecture from the project's GitHub release/artifacts:
+
+- `NetSpeed-<version>-x64.msix` for x64 Windows
+- `NetSpeed-<version>-ARM64.msix` for ARM64 Windows
+
+Release packages are digitally signed using **Microsoft Artifact Signing (Public Trust)**. You do **not** need to install or import a separate signing certificate into `TrustedPeople`.
+
+Open the downloaded `.msix` file and install it with Windows App Installer. Then open PowerToys Command Palette; NetSpeed will be available as a Command Palette extension.
+
+> Debug/CI artifacts may use a temporary development certificate and are intended for testing only. For normal installation, use a signed release package.
 
 ## Local development
 

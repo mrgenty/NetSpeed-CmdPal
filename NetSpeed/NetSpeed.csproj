@@ -16,7 +16,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
 
     <AppxPackageIdentityName>MicheleGentilini.NetSpeed.CmdPal</AppxPackageIdentityName>
-    <AppxPackagePublisher>CN=Michele Gentilini</AppxPackagePublisher>
+    <AppxPackagePublisher>CN=GENTILINI MICHELE, O=GENTILINI MICHELE, L=Palazzuolo sul Senio, S=Firenze, C=IT</AppxPackagePublisher>
     <AppxPackageVersion>0.1.1.0</AppxPackageVersion>
   </PropertyGroup>
 

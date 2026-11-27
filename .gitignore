@@ -5,4 +5,5 @@ artifacts/
 release-*/
 certs/
 *.pfx
-NetSpeed/ThirdParty/LibreSpeed/librespeed-cli.exe
+AppPackages/
+**/AppPackages/

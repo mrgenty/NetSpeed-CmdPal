@@ -29,12 +29,27 @@ public sealed class ThroughputTracker
 
     public double ElapsedSeconds => _samples.Count == 0 ? 0 : _samples[^1].Seconds;
 
-    /// <summary>Average over the whole phase, ramp-up included.</summary>
-    public double AverageMbps => _samples.Count == 0 ? 0 : Mbps(_samples[^1].Bytes, _samples[^1].Seconds);
+    /// <summary>
+    /// Average over the whole phase, ramp-up included. The phase ends at the first sample that
+    /// reached the final byte count: idle time spent waiting for the close handshake is excluded.
+    /// </summary>
+    public double AverageMbps
+    {
+        get
+        {
+            if (_samples.Count == 0)
+            {
+                return 0;
+            }
+
+            Sample end = _samples[EndIndex()];
+            return Mbps(end.Bytes, end.Seconds);
+        }
+    }
 
     /// <summary>
     /// Throughput after the warm-up: bytes moved between the first sample at or after the
-    /// warm-up and the last sample, divided by that time. Falls back to
+    /// warm-up and the end of data transfer, divided by that time. Falls back to
     /// <see cref="AverageMbps"/> when less than <see cref="MinSteadySeconds"/> remain.
     /// </summary>
     public double SteadyMbps
@@ -46,7 +61,7 @@ public sealed class ThroughputTracker
                 return AverageMbps;
             }
 
-            Sample last = _samples[^1];
+            Sample last = _samples[EndIndex()];
             int start = _samples.FindIndex(s => s.Seconds >= _warmupSeconds);
             if (start < 0 || last.Seconds - _samples[start].Seconds < MinSteadySeconds)
             {
@@ -106,6 +121,19 @@ public sealed class ThroughputTracker
         }
 
         return Mbps(last.Bytes - reference.Bytes, last.Seconds - reference.Seconds);
+    }
+
+    /// <summary>Index of the first sample that reached the final byte count (end of data flow).</summary>
+    private int EndIndex()
+    {
+        long total = _samples[^1].Bytes;
+        int index = _samples.Count - 1;
+        while (index > 0 && _samples[index - 1].Bytes == total)
+        {
+            index--;
+        }
+
+        return index;
     }
 
     public static double Mbps(long bytes, double seconds) =>

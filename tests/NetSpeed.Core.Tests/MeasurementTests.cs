@@ -48,6 +48,26 @@ public class ThroughputTrackerTests
     }
 
     [Fact]
+    public void Idle_tail_after_last_byte_is_excluded()
+    {
+        // 10 s at 1000 Mbps, then 1 s with no data while waiting for the close handshake.
+        ThroughputTracker t = new(2);
+        for (int i = 1; i <= 100; i++)
+        {
+            t.Add(i / 10d, i * 12_500_000L);
+        }
+
+        for (int i = 101; i <= 110; i++)
+        {
+            t.Add(i / 10d, 100 * 12_500_000L);
+        }
+
+        Assert.Equal(1000, t.SteadyMbps, 6);
+        Assert.Equal(1000, t.AverageMbps, 6);
+        Assert.Equal(11, t.ElapsedSeconds, 6);
+    }
+
+    [Fact]
     public void Steady_falls_back_to_average_when_too_short()
     {
         ThroughputTracker t = new(2);

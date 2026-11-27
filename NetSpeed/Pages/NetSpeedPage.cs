@@ -189,7 +189,7 @@ internal sealed partial class NetSpeedPage : ListPage
 
         items.Add(new ListItem(new OpenUrlCommand(DeveloperWebsite))
         {
-            Title = "Developer: Michele Gentilini",
+            Title = "Developer: g_",
             Subtitle = "genty.me",
         });
         return [.. items];
@@ -328,7 +328,7 @@ internal sealed partial class NetSpeedPage : ListPage
         });
         items.Add(new ListItem(new OpenUrlCommand(DeveloperWebsite))
         {
-            Title = "Developer: Michele Gentilini",
+            Title = "Developer: g_",
             Subtitle = "genty.me",
         });
         return [.. items];

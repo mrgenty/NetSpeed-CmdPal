@@ -2,7 +2,7 @@
 
 _Last updated: 2026-11-27 — applies to NetSpeed 0.2.0 and later._
 
-NetSpeed is a free, open-source (MIT) extension for PowerToys Command Palette, developed by Michele Gentilini ([genty.me](https://genty.me/)). It runs Internet speed tests on the **Measurement Lab (M-Lab)** platform. This notice explains what data is involved and who handles it.
+NetSpeed is a free, open-source (MIT) extension for PowerToys Command Palette, developed by g_ ([genty.me](https://genty.me/)). It runs Internet speed tests on the **Measurement Lab (M-Lab)** platform. This notice explains what data is involved and who handles it.
 
 ## Summary
 

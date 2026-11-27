@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 - Unreleased
+## 0.2.0 - 2026-11-27
 
 - New speed-test engine based on **Measurement Lab (M-Lab)**, written in C# with no external executables:
   - Locate API v2 server discovery with access tokens; candidates ranked by measured round-trip time.
@@ -13,7 +13,8 @@
 - Local limit of 40 tests per 24 hours, as required by the M-Lab Acceptable Use Policy for interactive users.
 - Clear error messages for no capacity, busy servers, timeouts and network errors.
 - New platform-independent `NetSpeed.Core` library and cross-platform unit tests, run in CI.
-- New `PRIVACY.md`.
+- New `PRIVACY.md`. Removed `SECURITY.md`, `THIRD_PARTY_NOTICES.md`, `PROJECT_INFO.txt` and `scripts/Install-Package.ps1`.
+- Developer shown as `g_`.
 - **Removed** LibreSpeed CLI, its LGPL notice and `scripts/Prepare-LibreSpeed.ps1`. The package no longer contains third-party executables.
 
 ## 0.1.1 - 2026-08-23

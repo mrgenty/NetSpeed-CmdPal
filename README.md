@@ -1,109 +1,65 @@
 # NetSpeed for PowerToys Command Palette
 
-A compact Internet speed test extension for **Microsoft PowerToys Command Palette**.
-
-NetSpeed runs a speed test on demand and shows the result directly inside Command Palette: download, upload, idle latency, jitter, latency under load (bufferbloat), test server and transferred data. Tests run on the open **Measurement Lab (M-Lab)** platform.
+Internet speed test inside **PowerToys Command Palette**: download, upload, latency, jitter and bufferbloat, measured on the open **Measurement Lab (M-Lab)** platform.
 
 ## Features
 
-- One-command Internet speed test inside Command Palette
-- Live Mbps while downloading and uploading, with a Cancel command
-- Download and upload in Mbps: steady-state value (after TCP ramp-up) plus full-phase average
-- Idle latency and jitter
-- Latency under load during download and upload, with a bufferbloat grade
-- Multi-stream measurement (MSAK, 4 TCP streams) for fast connections, with automatic ndt7 fallback
-- Automatic nearest-server selection (M-Lab Locate + round-trip-time ranking)
+- Live Mbps while testing, with Cancel
+- Download and upload: steady-state value (after TCP ramp-up) and full-phase average
+- Idle latency, jitter, latency under load and bufferbloat grade
+- Multi-stream test (MSAK, 4 TCP streams) for fast connections, with automatic ndt7 fallback
+- Nearest-server selection (M-Lab Locate + round-trip-time ranking)
 - **Copy result** as plain text (your IP address is left out)
-- No NetSpeed telemetry, no external executables
-- Clear first-run data notice; consent stored locally and revocable
-- x64 and ARM64 builds
-- Release MSIX packages digitally signed with Microsoft Artifact Signing (Public Trust)
+- No telemetry, no bundled executables
+- x64 and ARM64; release packages signed with Microsoft Artifact Signing
 
-## Speed-test engine
+## How it measures
 
-NetSpeed contains its own C# client for M-Lab (`NetSpeed.Core`), using only `HttpClient` and `ClientWebSocket`. It is trimming/AOT compatible (no reflection, JSON source generation).
+`NetSpeed.Core` is a self-contained C# client for M-Lab, built on `HttpClient` and `ClientWebSocket`. It is AOT- and trim-compatible.
 
-1. **Server discovery** — [Locate API v2](https://github.com/m-lab/locate/blob/main/USAGE.md) returns up to four nearby servers with short-lived access tokens. NetSpeed measures the TCP handshake time to each and starts with the fastest.
-2. **Idle latency and jitter** — 10 TCP handshakes to the selected server's HTTPS port before any load. Jitter is the mean absolute difference between consecutive samples.
-3. **Download and upload** — 10 seconds each using [MSAK throughput1](https://github.com/m-lab/msak) with 4 parallel streams. If MSAK has no capacity or every server refuses, NetSpeed falls back to [ndt7](https://github.com/m-lab/ndt-server/blob/main/spec/ndt7-protocol.md), which uses a single TCP stream.
-   - Download speed is counted by NetSpeed on received application data.
-   - Upload speed comes from the measurement messages sent by the server, because client-side counters include socket buffers.
-   - The headline value ignores the first 2 seconds (TCP slow start and stream ramp-up). The average over the whole phase is shown next to it.
-4. **Latency under load** — TCP handshakes every 250 ms while data is flowing. *Bufferbloat* is the worst loaded latency minus the idle latency (Low < 30 ms, Moderate < 100 ms, High ≥ 100 ms).
+1. **Server**: [Locate API v2](https://github.com/m-lab/locate/blob/main/USAGE.md) returns up to four nearby servers. NetSpeed picks the one with the fastest TCP handshake.
+2. **Idle latency and jitter**: 10 TCP handshakes before any load.
+3. **Download and upload**: 10 s each with [MSAK throughput1](https://github.com/m-lab/msak) over 4 streams. If MSAK is unavailable, NetSpeed falls back to [ndt7](https://github.com/m-lab/ndt-server/blob/main/spec/ndt7-protocol.md), which uses a single stream.
+   - Upload speed comes from the server's own counters.
+   - The headline value ignores the first 2 s of ramp-up.
+4. **Latency under load**: TCP handshakes every 250 ms while data flows. Bufferbloat is the worst loaded latency minus the idle latency.
 
 ### Limits
 
-- M-Lab servers sit at well-connected sites, usually off your ISP's network. Commercial services with servers inside the ISP network can report higher figures, especially above 1 Gbps.
-- On ndt7 fallback, a single TCP stream may not fill very fast links.
-- At multi-gigabit speeds, the PC's CPU (TLS) and Wi-Fi can be the bottleneck.
-- ISP name and client location are not shown: M-Lab does not return them, and NetSpeed does not call any third-party geolocation service.
+- M-Lab servers are usually off your ISP's network, so services with in-ISP servers can report more, especially above 1 Gbps.
+- With the ndt7 fallback, a single stream may not saturate very fast links.
+- ISP name and location are not shown: M-Lab does not provide them, and NetSpeed calls no geolocation service.
 
 ## Data and consent
 
-Before the first test, NetSpeed explains that **M-Lab publishes every test result, including your public IP address, as open data**, and asks for your agreement. The choice is stored only on your PC.
+**M-Lab publishes every test result, including your public IP address, as open data.** NetSpeed tells you this before the first test and runs only after you agree. Your choice is stored locally and can be withdrawn.
 
 NetSpeed follows the [M-Lab Acceptable Use Policy](https://www.measurementlab.net/aup/):
 
 - the client identifies itself as `netspeed-cmdpal`;
-- tests run only on demand;
-- at most 40 tests run per 24 hours.
+- tests run on demand only;
+- at most 40 tests run in 24 hours.
 
-See [PRIVACY.md](PRIVACY.md) for details.
-
-## Requirements
-
-- Windows 11 (Windows 10 19041+ supported by the package)
-- PowerToys with Command Palette
-- .NET 10 SDK / Visual Studio with the Windows development workload for local builds
-- Internet access during speed testing
+See [PRIVACY.md](PRIVACY.md).
 
 ## Installation
 
-Download the MSIX package for your architecture from the project's GitHub release/artifacts:
+Download `NetSpeed-<version>-x64.msix` or `NetSpeed-<version>-ARM64.msix` from [Releases](https://github.com/mrgenty/NetSpeed-CmdPal/releases) and open it with App Installer. Release packages are publicly trusted: no certificate import is needed. Then open Command Palette and search for **NetSpeed**.
 
-- `NetSpeed-<version>-x64.msix` for x64 Windows
-- `NetSpeed-<version>-ARM64.msix` for ARM64 Windows
+## Development
 
-Release packages are digitally signed using **Microsoft Artifact Signing (Public Trust)**. You do **not** need to install or import a separate signing certificate into `TrustedPeople`.
-
-Open the downloaded `.msix` file and install it with Windows App Installer. Then open PowerToys Command Palette; NetSpeed will be available as a Command Palette extension.
-
-> Debug/CI artifacts may use a temporary development certificate and are intended for testing only. For normal installation, use a signed release package.
-
-## Local development
-
-Open `NetSpeed.sln` in Visual Studio and build/deploy the `NetSpeed` project. No extra preparation step is needed.
-
-Command line:
+Requires the .NET 10 SDK, or Visual Studio with the Windows development workload. Open `NetSpeed.sln`, or run:
 
 ```powershell
 dotnet publish NetSpeed\NetSpeed.csproj -c Release -p:Platform=x64 -r win-x64 -p:GenerateAppxPackageOnBuild=true -p:AppxPackageSigningEnabled=false
 ```
 
-> If the repository lives in a very deep folder, CsWinRT code generation can exceed the Windows path limit. Clone to a short path such as `C:\src\NetSpeed-CmdPal`.
-
-### Tests
-
-`NetSpeed.Core` targets plain `net10.0`, so its tests run on Windows, Linux or macOS:
-
 ```powershell
 dotnet test tests\NetSpeed.Core.Tests
 ```
 
-They cover throughput and latency math, Locate and measurement parsing, query building, the consent store and the fair-use limit. A loopback fake WebSocket server exercises the real download/upload code; the tests never contact M-Lab.
-
-## Project layout
-
-- `NetSpeed/` — Command Palette extension (UI, packaging)
-- `NetSpeed.Core/` — platform-independent engine (`ISpeedEngine`, `SpeedResult`, M-Lab client)
-- `tests/NetSpeed.Core.Tests/` — unit tests
+The tests run on any OS and never contact M-Lab: a local fake WebSocket server exercises the real download and upload code. Clone to a short path (e.g. `C:\src`), because very deep folders can exceed the Windows path limit during CsWinRT code generation.
 
 ## License
 
-NetSpeed source code: **MIT License**, copyright © 2026 Michele Gentilini. See `THIRD_PARTY_NOTICES.md`.
-
-NetSpeed is not affiliated with or endorsed by Measurement Lab.
-
-## Changelog
-
-See `CHANGELOG.md`. Version 0.2.0 replaces LibreSpeed with a built-in M-Lab client.
+MIT © 2026 g_. Not affiliated with or endorsed by Measurement Lab, Microsoft or Ookla.

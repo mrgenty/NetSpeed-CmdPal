@@ -54,9 +54,10 @@ Security issues affecting the following areas are considered in scope:
 
 - NetSpeed's PowerToys Command Palette extension
 - MSIX packaging and installation behavior
-- NetSpeed's interaction with LibreSpeed CLI
+- NetSpeed's M-Lab client (Locate v2, MSAK, ndt7) and its handling of server responses
+- The local consent/state file (`state.json`)
 - Input or output parsing that could result in unintended code execution or unsafe behavior
-- Unsafe handling of files, paths, processes, or network responses
+- Unsafe handling of files, paths, or network responses
 - Build and release pipeline issues that could compromise distributed NetSpeed packages
 - Signing or package-integrity issues affecting official NetSpeed releases
 - Leakage of information that NetSpeed is expected to keep private
@@ -67,8 +68,7 @@ The following are generally outside the scope of this project:
 
 - Vulnerabilities in Microsoft PowerToys itself
 - Vulnerabilities in Windows or the .NET runtime
-- Vulnerabilities entirely within LibreSpeed CLI that are not caused or amplified by NetSpeed's integration
-- Vulnerabilities in third-party LibreSpeed public servers
+- Vulnerabilities in Measurement Lab infrastructure or services (report them to M-Lab)
 - General availability or performance problems with public speed-test servers
 - ISP behavior, network filtering, or inaccurate speed-test results
 - Social engineering attacks
@@ -81,7 +81,17 @@ Upstream vulnerabilities should be reported directly to the affected upstream pr
 
 NetSpeed performs an Internet speed test only when explicitly requested by the user.
 
-Running a speed test transfers a significant amount of network traffic to and from a selected LibreSpeed server. The selected backend may receive information normally exposed during an Internet connection, such as the user's public IP address, and may return ISP or approximate location information.
+Running a speed test transfers a significant amount of network traffic to and from a Measurement Lab (M-Lab) server. All connections use TLS (`https`/`wss`); NetSpeed rejects non-`wss` test URLs. NetSpeed runs no external processes and contains no third-party executables.
+
+### Data policy and consent
+
+- Before the first test, NetSpeed shows a notice explaining that **M-Lab publishes test results, including the user's public IP address, as open data**, and runs a test only after explicit agreement.
+- The agreement (with its version and time) and the times of recent tests are stored in a local `state.json` file that never leaves the device. Consent can be withdrawn from the NetSpeed page.
+- NetSpeed sends M-Lab only what the test needs plus a client identification (`client_name=netspeed-cmdpal`, version, OS, CPU architecture).
+- NetSpeed enforces the M-Lab AUP limit of 40 tests per 24 hours for interactive users.
+- The **Copy result** text does not include the IP address.
+
+See [PRIVACY.md](PRIVACY.md) for the full privacy notice.
 
 NetSpeed does not operate its own telemetry or analytics backend.
 

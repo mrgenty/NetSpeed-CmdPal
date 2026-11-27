@@ -17,7 +17,7 @@
 
     <AppxPackageIdentityName>MicheleGentilini.NetSpeed.CmdPal</AppxPackageIdentityName>
     <AppxPackagePublisher>CN=GENTILINI MICHELE, O=GENTILINI MICHELE, L=Palazzuolo sul Senio, S=Firenze, C=IT</AppxPackagePublisher>
-    <AppxPackageVersion>0.1.1.0</AppxPackageVersion>
+    <AppxPackageVersion>0.2.0.0</AppxPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -28,14 +28,10 @@
     <Content Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
     <Content Include="Assets\StoreLogo.png" />
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
-    <Content Include="ThirdParty\LibreSpeed\librespeed-cli.exe">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </Content>
-    <Content Include="ThirdParty\LibreSpeed\LICENSE-LGPL-3.0.txt">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NetSpeed.Core\NetSpeed.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

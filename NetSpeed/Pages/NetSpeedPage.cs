@@ -1,17 +1,35 @@
+using System.Diagnostics;
 using System.Globalization;
-using System.Threading;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
+using NetSpeed.Core;
+using NetSpeed.Core.Mlab;
 
 namespace NetSpeed;
 
 internal sealed partial class NetSpeedPage : ListPage
 {
-    private static readonly CultureInfo DisplayCulture = CultureInfo.InvariantCulture;
+    public const string Version = "0.2.0";
+    public const string DeveloperWebsite = "https://genty.me/";
+    public const string MlabWebsite = "https://www.measurementlab.net/";
+    public const string MlabPrivacyPolicy = "https://www.measurementlab.net/privacy/";
+    public const string MlabAup = "https://www.measurementlab.net/aup/";
+    public const string ProjectPrivacy = "https://github.com/mrgenty/NetSpeed-CmdPal/blob/main/PRIVACY.md";
 
-    private readonly SpeedTestService _speedTest = new();
+    private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
+    private static readonly TimeSpan OverallTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan UiRefreshInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
+
+    private readonly LocalStateStore _state = new(LocalStateStore.DefaultPath);
+#pragma warning disable CA1859 // The page depends on the engine abstraction on purpose.
+    private readonly ISpeedEngine _engine = new MlabEngine(Http, new MlabEngineOptions { ClientVersion = Version });
+#pragma warning restore CA1859
+    private readonly Lock _progressGate = new();
     private IListItem[] _items;
     private int _testInProgress;
+    private CancellationTokenSource? _cts;
+    private long _lastRefreshTicks;
 
     public NetSpeedPage()
     {
@@ -21,12 +39,38 @@ internal sealed partial class NetSpeedPage : ListPage
         _items = BuildIdleItems();
     }
 
-    public override IListItem[] GetItems() => _items;
+    public override IListItem[] GetItems() => Volatile.Read(ref _items);
+
+    private void SetItems(IListItem[] items)
+    {
+        Volatile.Write(ref _items, items);
+        RaiseItemsChanged();
+    }
 
     private void RequestRun()
     {
+        if (!_state.HasConsent)
+        {
+            SetItems(BuildConsentItems());
+            return;
+        }
+
         _ = RunAsync();
     }
+
+    private void AcceptAndRun()
+    {
+        _state.GrantConsent();
+        _ = RunAsync();
+    }
+
+    private void RevokeConsent()
+    {
+        _state.RevokeConsent();
+        SetItems(BuildIdleItems());
+    }
+
+    private void Cancel() => _cts?.Cancel();
 
     private async Task RunAsync()
     {
@@ -37,127 +81,257 @@ internal sealed partial class NetSpeedPage : ListPage
 
         try
         {
-            _items = BuildRunningItems();
-            RaiseItemsChanged();
+            if (!_state.TryRegisterTest())
+            {
+                SetItems(BuildErrorItems(
+                    "Daily test limit reached",
+                    $"M-Lab's fair-use policy allows up to {LocalStateStore.MaxTestsPerDay} tests per day. Please try again later."));
+                return;
+            }
 
-            LibreSpeedResult result = await _speedTest.RunAsync().ConfigureAwait(false);
-            _items = BuildResultItems(result);
-        }
-        catch (TimeoutException ex)
-        {
-            _items = BuildErrorItems("Speed test timed out", ex.Message);
-        }
-        catch (FileNotFoundException ex)
-        {
-            _items = BuildErrorItems("LibreSpeed component missing", ex.Message);
-        }
-        catch (Exception ex)
-        {
-            _items = BuildErrorItems("Speed test failed", FriendlyMessage(ex.Message));
+            using CancellationTokenSource cts = new(OverallTimeout);
+            _cts = cts;
+            IsLoading = true;
+            SetItems(BuildRunningItems(new SpeedProgress(SpeedPhase.Locating, 0, null, "Contacting M-Lab…")));
+
+            InlineProgress progress = new(OnProgress);
+            try
+            {
+                SpeedResult result = await Task.Run(() => _engine.RunAsync(progress, cts.Token), cts.Token).ConfigureAwait(false);
+                SetItems(BuildResultItems(result));
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                bool timedOut = cts.Token.IsCancellationRequested && !_userCancelled;
+                SetItems(timedOut
+                    ? BuildErrorItems("Speed test timed out", $"The test did not finish within {OverallTimeout.TotalSeconds:0} seconds and was stopped.")
+                    : BuildIdleItems("Speed test cancelled."));
+            }
+            catch (SpeedTestException ex)
+            {
+                SetItems(BuildErrorItems(ErrorTitle(ex.Kind), FriendlyMessage(ex.Message)));
+            }
+            catch (Exception ex) when (ex is HttpRequestException or System.Net.Sockets.SocketException or IOException)
+            {
+                SetItems(BuildErrorItems("Network error", FriendlyMessage(ex.Message)));
+            }
+#pragma warning disable CA1031 // Last line of defence: never crash the extension host.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                Debug.WriteLine(ex);
+                SetItems(BuildErrorItems("Speed test failed", FriendlyMessage(ex.Message)));
+            }
         }
         finally
         {
+            _cts = null;
+            _userCancelled = false;
+            IsLoading = false;
             Volatile.Write(ref _testInProgress, 0);
-            RaiseItemsChanged();
         }
     }
 
-    private IListItem[] BuildIdleItems() =>
-    [
-        new ListItem(new RunSpeedTestCommand(RequestRun))
+    private bool _userCancelled;
+
+    private void UserCancel()
+    {
+        _userCancelled = true;
+        Cancel();
+    }
+
+    private void OnProgress(SpeedProgress p)
+    {
+        // Throttle UI refreshes; always show phase changes.
+        long now = Stopwatch.GetTimestamp();
+        lock (_progressGate)
         {
-            Title = "▶ Run speed test",
-            Subtitle = "Measures ping, jitter, download and upload using the fastest available LibreSpeed server",
-        },
-        new ListItem(new NoOpCommand())
+            if (p.CurrentMbps is not null && Stopwatch.GetElapsedTime(_lastRefreshTicks, now) < UiRefreshInterval)
+            {
+                return;
+            }
+
+            _lastRefreshTicks = now;
+        }
+
+        if (Volatile.Read(ref _testInProgress) == 1)
         {
-            Title = "Privacy-first",
-            Subtitle = "No NetSpeed telemetry and no result sharing. Only traffic required by the speed test is generated.",
-        },
-        new ListItem(new OpenUrlCommand(SpeedTestService.LibreSpeedWebsite))
+            SetItems(BuildRunningItems(p));
+        }
+    }
+
+    // ---- Item builders ----------------------------------------------------
+
+    private IListItem[] BuildIdleItems(string? notice = null)
+    {
+        List<IListItem> items =
+        [
+            new ListItem(new ActionCommand("Run speed test", RequestRun))
+            {
+                Title = "▶ Run speed test",
+                Subtitle = notice ?? "Download, upload, latency, jitter and bufferbloat via Measurement Lab (M-Lab)",
+            },
+            new ListItem(new OpenUrlCommand(MlabWebsite))
+            {
+                Title = "Powered by Measurement Lab (M-Lab)",
+                Subtitle = "Open, non-commercial Internet measurement platform • results are published as open data",
+            },
+        ];
+
+        if (_state.HasConsent)
         {
-            Title = "LibreSpeed",
-            Subtitle = "Open librespeed.org",
-        },
-        new ListItem(new OpenUrlCommand(SpeedTestService.DeveloperWebsite))
+            items.Add(new ListItem(new ActionCommand("Withdraw consent", RevokeConsent))
+            {
+                Title = "Withdraw data-policy consent",
+                Subtitle = "NetSpeed will ask again before the next test",
+            });
+        }
+
+        items.Add(new ListItem(new OpenUrlCommand(DeveloperWebsite))
         {
             Title = "Developer: Michele Gentilini",
             Subtitle = "genty.me",
-        },
-    ];
+        });
+        return [.. items];
+    }
 
-    private IListItem[] BuildRunningItems() =>
+    private IListItem[] BuildConsentItems() =>
     [
         new ListItem(new NoOpCommand())
         {
-            Title = "⏱ Speed test in progress…",
-            Subtitle = "Selecting the fastest server, then testing download and upload. This can take around 20–30 seconds.",
+            Title = "Before your first test: your result becomes public data",
+            Subtitle = "Tests run on M-Lab servers. M-Lab publishes every result, including your public IP address, as open data.",
         },
-        new ListItem(new NoOpCommand())
+        new ListItem(new ActionCommand("Agree and run", AcceptAndRun))
         {
-            Title = "Please keep this page open",
-            Subtitle = "NetSpeed is using LibreSpeed public test infrastructure.",
+            Title = "✓ I agree — run the speed test",
+            Subtitle = "You accept M-Lab's privacy policy and acceptable use policy. Your choice is saved on this device only.",
+        },
+        new ListItem(new OpenUrlCommand(MlabPrivacyPolicy))
+        {
+            Title = "Read M-Lab privacy policy",
+            Subtitle = MlabPrivacyPolicy,
+        },
+        new ListItem(new OpenUrlCommand(MlabAup))
+        {
+            Title = "Read M-Lab acceptable use policy",
+            Subtitle = MlabAup,
+        },
+        new ListItem(new OpenUrlCommand(ProjectPrivacy))
+        {
+            Title = "Read NetSpeed privacy notice",
+            Subtitle = "What NetSpeed itself stores (nothing leaves your PC except the test traffic)",
+        },
+        new ListItem(new ActionCommand("Not now", () => SetItems(BuildIdleItems("No test was run."))))
+        {
+            Title = "Not now",
+            Subtitle = "Go back without testing",
         },
     ];
 
-    private IListItem[] BuildResultItems(LibreSpeedResult r)
+    private IListItem[] BuildRunningItems(SpeedProgress p)
     {
-        string serverName = string.IsNullOrWhiteSpace(r.Server.Name) ? "LibreSpeed server" : r.Server.Name;
-        string serverHost = GetHost(r.Server.Url);
-        string organization = string.IsNullOrWhiteSpace(r.Client.Organization) ? "ISP unavailable" : r.Client.Organization;
-        string location = BuildLocation(r.Client);
-        string testedAt = r.Timestamp == default
-            ? DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss", DisplayCulture)
-            : r.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", DisplayCulture);
+        string percent = (Math.Clamp(p.Fraction, 0, 1) * 100).ToString("0", Invariant) + "%";
+        string title = p.Phase switch
+        {
+            SpeedPhase.Download => $"↓ {ResultFormatter.Mbps(p.CurrentMbps ?? 0)} Mbps",
+            SpeedPhase.Upload => $"↑ {ResultFormatter.Mbps(p.CurrentMbps ?? 0)} Mbps",
+            SpeedPhase.Latency => "⏱ Measuring latency…",
+            _ => "⏱ Preparing speed test…",
+        };
+        string phase = p.Phase switch
+        {
+            SpeedPhase.Download => "Download",
+            SpeedPhase.Upload => "Upload",
+            SpeedPhase.Latency => "Latency",
+            _ => "Locating server",
+        };
 
         return
         [
             new ListItem(new NoOpCommand())
             {
-                Title = $"↓ {N(r.Download)} Mbps",
-                Subtitle = "Download",
+                Title = title,
+                Subtitle = $"{phase} • {percent}" + (string.IsNullOrEmpty(p.Detail) ? string.Empty : $" • {p.Detail}"),
             },
-            new ListItem(new NoOpCommand())
+            new ListItem(new ActionCommand("Cancel", UserCancel))
             {
-                Title = $"↑ {N(r.Upload)} Mbps",
-                Subtitle = "Upload",
-            },
-            new ListItem(new NoOpCommand())
-            {
-                Title = $"Latency {N(r.Ping)} ms",
-                Subtitle = $"Jitter {N(r.Jitter)} ms",
-            },
-            new ListItem(new NoOpCommand())
-            {
-                Title = serverName,
-                Subtitle = string.IsNullOrWhiteSpace(serverHost) ? "Selected LibreSpeed server" : $"Server: {serverHost}",
-            },
-            new ListItem(new NoOpCommand())
-            {
-                Title = organization,
-                Subtitle = string.IsNullOrWhiteSpace(location) ? "Client network" : location,
-            },
-            new ListItem(new NoOpCommand())
-            {
-                Title = $"Transferred {FormatBytes(r.BytesReceived + r.BytesSent)}",
-                Subtitle = $"Received {FormatBytes(r.BytesReceived)} • Sent {FormatBytes(r.BytesSent)} • {testedAt}",
-            },
-            new ListItem(new RunSpeedTestCommand(RequestRun))
-            {
-                Title = "↻ Run again",
-                Subtitle = "Start a new speed test",
-            },
-            new ListItem(new OpenUrlCommand(SpeedTestService.LibreSpeedCliWebsite))
-            {
-                Title = "About the test engine",
-                Subtitle = "LibreSpeed CLI 1.0.13 • LGPL-3.0",
-            },
-            new ListItem(new OpenUrlCommand(SpeedTestService.DeveloperWebsite))
-            {
-                Title = "Developer: Michele Gentilini",
-                Subtitle = "genty.me",
+                Title = "✕ Cancel test",
+                Subtitle = "Stop the test now",
             },
         ];
+    }
+
+    private IListItem[] BuildResultItems(SpeedResult r)
+    {
+        string latencySubtitle = r.JitterMs is double jitter
+            ? $"Idle latency • jitter {ResultFormatter.Ms(jitter)} • {r.LatencyMethod}"
+            : $"Idle latency • {r.LatencyMethod}";
+
+        List<IListItem> items =
+        [
+            new ListItem(new NoOpCommand())
+            {
+                Title = $"↓ {ResultFormatter.Mbps(r.DownloadMbps)} Mbps",
+                Subtitle = $"Download (after ramp-up) • full-phase average {ResultFormatter.Mbps(r.DownloadAverageMbps)} Mbps",
+            },
+            new ListItem(new NoOpCommand())
+            {
+                Title = $"↑ {ResultFormatter.Mbps(r.UploadMbps)} Mbps",
+                Subtitle = $"Upload (after ramp-up) • full-phase average {ResultFormatter.Mbps(r.UploadAverageMbps)} Mbps",
+            },
+            new ListItem(new NoOpCommand())
+            {
+                Title = $"Latency {ResultFormatter.Ms(r.IdleLatencyMs)}",
+                Subtitle = latencySubtitle,
+            },
+        ];
+
+        if (r.DownloadLoadedLatencyMs is not null || r.UploadLoadedLatencyMs is not null)
+        {
+            string bloat = r.BufferbloatMs is double b
+                ? $"Bufferbloat +{b.ToString("0", Invariant)} ms ({r.BufferbloatGrade})"
+                : "Bufferbloat n/a";
+            items.Add(new ListItem(new NoOpCommand())
+            {
+                Title = bloat,
+                Subtitle = $"Latency under load: download {ResultFormatter.Ms(r.DownloadLoadedLatencyMs)} • upload {ResultFormatter.Ms(r.UploadLoadedLatencyMs)}",
+            });
+        }
+
+        items.Add(new ListItem(new CopyTextCommand(ResultFormatter.ToClipboardText(r)))
+        {
+            Title = "Copy result",
+            Subtitle = "Copy a plain-text summary (your IP address is not included)",
+        });
+        items.Add(new ListItem(new NoOpCommand())
+        {
+            Title = $"Server: {ResultFormatter.ServerPlace(r)}",
+            Subtitle = $"{r.ServerMachine} • {r.EngineName} {r.Protocol} • {r.Streams} stream{(r.Streams == 1 ? string.Empty : "s")}",
+        });
+        items.Add(new ListItem(new NoOpCommand())
+        {
+            Title = $"Transferred {ResultFormatter.Bytes(r.BytesReceived + r.BytesSent)}",
+            Subtitle = $"Received {ResultFormatter.Bytes(r.BytesReceived)} • sent {ResultFormatter.Bytes(r.BytesSent)} • "
+                + r.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", Invariant)
+                + (r.ClientAddress is null ? string.Empty : $" • your IP {r.ClientAddress}"),
+        });
+        items.Add(new ListItem(new ActionCommand("Run again", RequestRun))
+        {
+            Title = "↻ Run again",
+            Subtitle = $"{_state.RemainingTests} of {LocalStateStore.MaxTestsPerDay} tests left in the last 24 hours (M-Lab fair use)",
+        });
+        items.Add(new ListItem(new OpenUrlCommand(MlabWebsite))
+        {
+            Title = "About Measurement Lab",
+            Subtitle = "This result is published by M-Lab as open data",
+        });
+        items.Add(new ListItem(new OpenUrlCommand(DeveloperWebsite))
+        {
+            Title = "Developer: Michele Gentilini",
+            Subtitle = "genty.me",
+        });
+        return [.. items];
     }
 
     private IListItem[] BuildErrorItems(string title, string detail) =>
@@ -167,45 +341,28 @@ internal sealed partial class NetSpeedPage : ListPage
             Title = $"⚠ {title}",
             Subtitle = detail,
         },
-        new ListItem(new RunSpeedTestCommand(RequestRun))
+        new ListItem(new ActionCommand("Try again", RequestRun))
         {
             Title = "↻ Try again",
             Subtitle = "Start a new speed test",
         },
-        new ListItem(new OpenUrlCommand(SpeedTestService.LibreSpeedWebsite))
+        new ListItem(new OpenUrlCommand(MlabWebsite))
         {
-            Title = "Check LibreSpeed",
-            Subtitle = "Open librespeed.org",
+            Title = "Measurement Lab status and information",
+            Subtitle = "measurementlab.net",
         },
     ];
 
-    private static string N(double value) => value.ToString("0.0", DisplayCulture);
-
-    private static string GetHost(string? url)
+    private static string ErrorTitle(SpeedTestErrorKind kind) => kind switch
     {
-        return Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) ? uri.Host : string.Empty;
-    }
-
-    private static string BuildLocation(LibreSpeedClient client)
-    {
-        string[] parts = [client.City ?? string.Empty, client.Region ?? string.Empty, client.Country ?? string.Empty];
-        return string.Join(", ", parts.Where(static part => !string.IsNullOrWhiteSpace(part)).Distinct(StringComparer.OrdinalIgnoreCase));
-    }
-
-    private static string FormatBytes(ulong bytes)
-    {
-        const double kib = 1024d;
-        const double mib = kib * 1024d;
-        const double gib = mib * 1024d;
-
-        return bytes switch
-        {
-            >= (ulong)gib => $"{bytes / gib:0.00} GiB",
-            >= (ulong)mib => $"{bytes / mib:0.0} MiB",
-            >= (ulong)kib => $"{bytes / kib:0.0} KiB",
-            _ => $"{bytes} B",
-        };
-    }
+        SpeedTestErrorKind.NoCapacity => "M-Lab is at capacity",
+        SpeedTestErrorKind.AllServersRejected => "Servers are busy",
+        SpeedTestErrorKind.LocateFailed => "No test server available",
+        SpeedTestErrorKind.Timeout => "Speed test timed out",
+        SpeedTestErrorKind.Network => "Network error",
+        SpeedTestErrorKind.RateLimited => "Daily test limit reached",
+        _ => "Speed test failed",
+    };
 
     private static string FriendlyMessage(string message)
     {
@@ -216,5 +373,14 @@ internal sealed partial class NetSpeedPage : ListPage
 
         string singleLine = message.Replace('\r', ' ').Replace('\n', ' ').Trim();
         return singleLine.Length <= 220 ? singleLine : singleLine[..217] + "…";
+    }
+
+    /// <summary>
+    /// Reports synchronously on the engine's thread. <see cref="Progress{T}"/> would post to the
+    /// thread pool (no synchronization context in the COM server) and could reorder updates.
+    /// </summary>
+    private sealed class InlineProgress(Action<SpeedProgress> handler) : IProgress<SpeedProgress>
+    {
+        public void Report(SpeedProgress value) => handler(value);
     }
 }

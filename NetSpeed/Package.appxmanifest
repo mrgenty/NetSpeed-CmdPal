@@ -7,7 +7,7 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap uap3 rescap">
 
-  <Identity Name="MicheleGentilini.NetSpeed.CmdPal" Publisher="CN=GENTILINI MICHELE, O=GENTILINI MICHELE, L=Palazzuolo sul Senio, S=Firenze, C=IT" Version="0.1.1.0" />
+  <Identity Name="MicheleGentilini.NetSpeed.CmdPal" Publisher="CN=GENTILINI MICHELE, O=GENTILINI MICHELE, L=Palazzuolo sul Senio, S=Firenze, C=IT" Version="0.2.0.0" />
 
   <Properties>
     <DisplayName>NetSpeed</DisplayName>
@@ -49,7 +49,7 @@
             Id="NetSpeed"
             PublicFolder="Public"
             DisplayName="NetSpeed"
-            Description="Internet speed test powered by LibreSpeed">
+            Description="Internet speed test powered by Measurement Lab (M-Lab)">
             <uap3:Properties>
               <CmdPalProvider>
                 <Activation>

@@ -145,8 +145,13 @@ internal static class PhaseRunner
         }
 
         Sample(phase, counters, clientTracker, serverTracker);
-        ThroughputTracker final = useServer && counters.Any(c => c.ServerMessages > 0) ? serverTracker : clientTracker;
-        if (final.TotalBytes <= 0)
+        bool serverReported = counters.Any(c => c.ServerMessages > 0);
+        ThroughputTracker final = useServer && serverReported ? serverTracker : clientTracker;
+
+        // Bytes the client merely queued into a socket the server then closed do not count:
+        // an upload that ended within a second without a single server measurement is empty.
+        bool emptyUpload = useServer && !serverReported && phase.Seconds < ThroughputTracker.MinSteadySeconds;
+        if (final.TotalBytes <= 0 || emptyUpload)
         {
             // Connected, then closed or reset before any payload: not a valid 0 Mbps result.
             throw new ServerUnavailableException($"The server closed the {what} test before any data was transferred.");

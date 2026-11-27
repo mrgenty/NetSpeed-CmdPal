@@ -1,9 +1,0 @@
-Project: NetSpeed for PowerToys Command Palette
-Version: 0.2.0
-Developer: Michele Gentilini
-Developer website: https://genty.me
-Speed-test engine: built-in M-Lab client (Locate v2, MSAK throughput1, ndt7 fallback)
-M-Lab client_name: netspeed-cmdpal
-NetSpeed license: MIT
-Command Palette package identity: MicheleGentilini.NetSpeed.CmdPal
-COM CLSID: C71F961F-3B9A-4380-B42C-7E5712AEE055

@@ -14,7 +14,6 @@ permissions:
 env:
   DOTNET_VERSION: "10.0.x"
   PROJECT_PATH: "NetSpeed/NetSpeed.csproj"
-  LIBRESPEED_VERSION: "1.0.13"
 
 jobs:
   release:
@@ -27,10 +26,8 @@ jobs:
         include:
           - platform: x64
             runtime: win-x64
-            librespeed_arch: amd64
           - platform: ARM64
             runtime: win-arm64
-            librespeed_arch: arm64
 
     steps:
       - name: Checkout repository
@@ -48,35 +45,17 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Run NetSpeed.Core tests
+        shell: pwsh
+        run: |
+          dotnet test tests/NetSpeed.Core.Tests/NetSpeed.Core.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "Unit tests failed." }
+
       - name: Restore and audit NuGet packages
         shell: pwsh
         run: |
           dotnet restore "${{ env.PROJECT_PATH }}" -p:NuGetAuditMode=all -warnaserror:NU1901,NU1902,NU1903,NU1904
           if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed." }
-
-      - name: Download and verify LibreSpeed CLI
-        shell: pwsh
-        run: |
-          $version = "${{ env.LIBRESPEED_VERSION }}"
-          $arch = "${{ matrix.librespeed_arch }}"
-          $file = "librespeed-cli_${version}_windows_${arch}.zip"
-          $baseUrl = "https://github.com/librespeed/speedtest-cli/releases/download/v${version}"
-
-          Invoke-WebRequest -Uri "$baseUrl/$file" -OutFile $file
-          Invoke-WebRequest -Uri "$baseUrl/checksums.txt" -OutFile "checksums.txt"
-
-          $checksumLine = Get-Content "checksums.txt" | Where-Object { $_ -match [regex]::Escape($file) } | Select-Object -First 1
-          if (-not $checksumLine) { throw "Checksum for $file not found." }
-
-          $expected = ($checksumLine -split '\s+')[0].Trim().ToLowerInvariant()
-          $actual = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($expected -ne $actual) { throw "LibreSpeed CLI checksum mismatch." }
-
-          $target = "NetSpeed\ThirdParty\LibreSpeed"
-          Remove-Item -Path $target -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $target | Out-Null
-          Expand-Archive -Path $file -DestinationPath $target -Force
-          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/librespeed/speedtest-cli/v${version}/LICENSE" -OutFile "$target\LICENSE-LGPL-3.0.txt"
 
       - name: Validate signing configuration
         shell: pwsh

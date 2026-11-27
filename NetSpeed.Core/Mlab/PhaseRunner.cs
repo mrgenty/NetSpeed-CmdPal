@@ -90,46 +90,23 @@ internal static class PhaseRunner
         Uri url = TestUriBuilder.AddQuery(options.Url, options.Query);
         int streamCount = options.Protocol.SupportsMultipleStreams ? Math.Max(1, options.Streams) : 1;
 
-        (ClientWebSocket? Socket, Exception? Error)[] attempts = await Task.WhenAll(
-            Enumerable.Range(0, streamCount).Select(_ => ConnectAsync(url, options, cancellationToken))).ConfigureAwait(false);
-
-        List<ClientWebSocket> sockets = [.. attempts.Where(a => a.Socket is not null).Select(a => a.Socket!)];
-        if (sockets.Count == 0)
-        {
-            Exception? first = attempts.Select(a => a.Error).FirstOrDefault(e => e is not null);
-            throw new ServerUnavailableException($"Server refused the {options.Direction.ToString().ToLowerInvariant()} test: {first?.Message}", first);
-        }
-
-        try
-        {
-            return await MeasureAsync(sockets, options, onSample, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            foreach (ClientWebSocket socket in sockets)
-            {
-                socket.Dispose();
-            }
-        }
-    }
-
-    private static async Task<PhaseResult> MeasureAsync(List<ClientWebSocket> sockets, PhaseOptions options, Action<double, double>? onSample, CancellationToken cancellationToken)
-    {
-        Stopwatch stopwatch = Stopwatch.StartNew();
+        // The phase clock starts when the first stream connects. Each stream starts consuming
+        // data as soon as its own handshake completes: the server starts its timed test at
+        // upgrade, so waiting for slower streams would distort the measurement.
+        Stopwatch clock = Stopwatch.StartNew();
+        PhaseClock phase = new(clock);
         using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(options.Duration + GracePeriod);
+        deadline.CancelAfter(options.ConnectTimeout + options.Duration + GracePeriod);
 
-        StreamCounters[] counters = [.. sockets.Select(_ => new StreamCounters())];
-        Task[] streamTasks = [.. sockets.Select((socket, i) => options.Direction == TestDirection.Download
-            ? ReceiveLoopAsync(socket, counters[i], options, closeOnServerClose: true, deadline.Token, cancellationToken)
-            : UploadAsync(socket, counters[i], options, stopwatch, deadline.Token, cancellationToken))];
-        Task all = Task.WhenAll(streamTasks);
+        StreamCounters[] counters = [.. Enumerable.Range(0, streamCount).Select(_ => new StreamCounters())];
+        Task<Exception?>[] streams = [.. counters.Select(c => RunStreamAsync(url, options, c, phase, deadline.Token, cancellationToken))];
+        Task all = Task.WhenAll(streams);
 
         List<(double Seconds, double Rtt)> pings = [];
         using CancellationTokenSource pingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task pingTask = options.PingAddress is null
             ? Task.CompletedTask
-            : PingLoopAsync(options.PingAddress, options.PingPort, stopwatch, pings, pingCts.Token);
+            : PingLoopAsync(options.PingAddress, options.PingPort, phase, pings, pingCts.Token);
 
         // Upload: the server's application counters are authoritative (ndt7 spec recommends
         // server measurements for upload); client-side counters include socket buffers.
@@ -141,12 +118,15 @@ internal static class PhaseRunner
         {
             await Task.WhenAny(all, Task.Delay(SampleInterval, cancellationToken)).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            Sample(stopwatch, counters, clientTracker, serverTracker);
-            ThroughputTracker live = useServer && serverTracker.TotalBytes > 0 ? serverTracker : clientTracker;
-            onSample?.Invoke(Math.Min(1, stopwatch.Elapsed.TotalSeconds / options.Duration.TotalSeconds), live.CurrentMbps());
+            if (phase.Started)
+            {
+                Sample(phase, counters, clientTracker, serverTracker);
+                ThroughputTracker live = useServer && serverTracker.TotalBytes > 0 ? serverTracker : clientTracker;
+                onSample?.Invoke(Math.Min(1, phase.Seconds / options.Duration.TotalSeconds), live.CurrentMbps());
+            }
         }
 
-        await all.ConfigureAwait(false);
+        Exception?[] errors = await Task.WhenAll(streams).ConfigureAwait(false);
         await pingCts.CancelAsync().ConfigureAwait(false);
         try
         {
@@ -156,8 +136,21 @@ internal static class PhaseRunner
         {
         }
 
-        Sample(stopwatch, counters, clientTracker, serverTracker);
+        int connected = counters.Count(c => c.Connected);
+        string what = options.Direction.ToString().ToLowerInvariant();
+        if (connected == 0)
+        {
+            Exception? first = errors.FirstOrDefault(e => e is not null);
+            throw new ServerUnavailableException($"Server refused the {what} test: {first?.Message}", first);
+        }
+
+        Sample(phase, counters, clientTracker, serverTracker);
         ThroughputTracker final = useServer && counters.Any(c => c.ServerMessages > 0) ? serverTracker : clientTracker;
+        if (final.TotalBytes <= 0)
+        {
+            // Connected, then closed or reset before any payload: not a valid 0 Mbps result.
+            throw new ServerUnavailableException($"The server closed the {what} test before any data was transferred.");
+        }
 
         List<double> serverRtt = [];
         foreach (StreamCounters c in counters)
@@ -172,7 +165,7 @@ internal static class PhaseRunner
             SteadyMbps = final.SteadyMbps,
             AverageMbps = final.AverageMbps,
             Bytes = final.TotalBytes,
-            StreamsConnected = sockets.Count,
+            StreamsConnected = connected,
             LoadedPingsMs = [.. pings.Where(p => p.Seconds >= 1.0).Select(p => p.Rtt)],
             ServerRttMs = serverRtt,
             ServerMinRttMs = minRttUs / 1000d,
@@ -181,11 +174,38 @@ internal static class PhaseRunner
         };
     }
 
-    private static void Sample(Stopwatch stopwatch, StreamCounters[] counters, ThroughputTracker client, ThroughputTracker server)
+    private static void Sample(PhaseClock phase, StreamCounters[] counters, ThroughputTracker client, ThroughputTracker server)
     {
-        double t = stopwatch.Elapsed.TotalSeconds;
+        double t = phase.Seconds;
         client.Add(t, counters.Sum(c => Interlocked.Read(ref c.ClientBytes)));
         server.Add(t, counters.Sum(c => Interlocked.Read(ref c.ServerAppBytes)));
+    }
+
+    /// <summary>Connects one stream and, as soon as it is up, runs its download or upload loop.</summary>
+    /// <returns>The connection error, or null when the stream connected.</returns>
+    private static async Task<Exception?> RunStreamAsync(Uri url, PhaseOptions options, StreamCounters counters, PhaseClock phase, CancellationToken deadline, CancellationToken userToken)
+    {
+        (ClientWebSocket? socket, Exception? error) = await ConnectAsync(url, options, userToken).ConfigureAwait(false);
+        if (socket is null)
+        {
+            return error;
+        }
+
+        using (socket)
+        {
+            counters.Connected = true;
+            phase.MarkStarted();
+            if (options.Direction == TestDirection.Download)
+            {
+                await ReceiveLoopAsync(socket, counters, options, closeOnServerClose: true, deadline, userToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await UploadAsync(socket, counters, options, phase.Clock.Elapsed, phase.Clock, deadline, userToken).ConfigureAwait(false);
+            }
+        }
+
+        return null;
     }
 
     private static async Task<(ClientWebSocket? Socket, Exception? Error)> ConnectAsync(Uri url, PhaseOptions options, CancellationToken cancellationToken)
@@ -303,7 +323,8 @@ internal static class PhaseRunner
         ClientWebSocket socket,
         StreamCounters counters,
         PhaseOptions options,
-        Stopwatch stopwatch,
+        TimeSpan streamStart,
+        Stopwatch clock,
         CancellationToken deadline,
         CancellationToken userToken)
     {
@@ -313,7 +334,8 @@ internal static class PhaseRunner
         long queued = 0;
         try
         {
-            while (socket.State == WebSocketState.Open && !receive.IsCompleted && stopwatch.Elapsed < options.Duration)
+            // Each stream uploads for the full duration from its own connection time.
+            while (socket.State == WebSocketState.Open && !receive.IsCompleted && clock.Elapsed - streamStart < options.Duration)
             {
                 await socket.SendAsync(Payload.AsMemory(0, size), WebSocketMessageType.Binary, endOfMessage: true, deadline).ConfigureAwait(false);
                 queued += size;
@@ -349,11 +371,11 @@ internal static class PhaseRunner
         }
     }
 
-    private static async Task PingLoopAsync(IPAddress address, int port, Stopwatch stopwatch, List<(double Seconds, double Rtt)> pings, CancellationToken cancellationToken)
+    private static async Task PingLoopAsync(IPAddress address, int port, PhaseClock phase, List<(double Seconds, double Rtt)> pings, CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            double at = stopwatch.Elapsed.TotalSeconds;
+            double at = phase.Seconds; // 0 until a stream is up; such samples are discarded.
             if (await TcpPinger.PingAsync(address, port, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false) is double rtt)
             {
                 lock (pings)
@@ -374,11 +396,34 @@ internal static class PhaseRunner
         return data;
     }
 
+    /// <summary>Phase time measured from the moment the first stream connected.</summary>
+    private sealed class PhaseClock(Stopwatch clock)
+    {
+        private long _originTicks = -1;
+
+        public Stopwatch Clock => clock;
+
+        public bool Started => Interlocked.Read(ref _originTicks) >= 0;
+
+        public double Seconds
+        {
+            get
+            {
+                long origin = Interlocked.Read(ref _originTicks);
+                return origin < 0 ? 0 : TimeSpan.FromTicks(clock.Elapsed.Ticks - origin).TotalSeconds;
+            }
+        }
+
+        public void MarkStarted() => Interlocked.CompareExchange(ref _originTicks, clock.Elapsed.Ticks, -1);
+    }
+
     private sealed class StreamCounters
     {
         public long ClientBytes;
         public long ServerAppBytes;
         private readonly List<double> _rttMs = [];
+
+        public bool Connected { get; set; }
 
         public int ServerMessages { get; private set; }
 

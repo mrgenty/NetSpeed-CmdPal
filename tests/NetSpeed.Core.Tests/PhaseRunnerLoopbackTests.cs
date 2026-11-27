@@ -19,6 +19,7 @@ public sealed class PhaseRunnerLoopbackTests : IAsyncDisposable
     private readonly string _prefix;
     private int _connections;
     private long _uploadBytesReceivedByServer;
+    private int _slowSeen;
 
     public PhaseRunnerLoopbackTests()
     {
@@ -98,7 +99,39 @@ public sealed class PhaseRunnerLoopbackTests : IAsyncDisposable
             cts.Token));
     }
 
-    private PhaseOptions Options(TestDirection direction, string path, int streams, double seconds = 1.2) => new()
+    [Fact]
+    public async Task Fast_streams_are_measured_while_a_slow_stream_is_still_connecting()
+    {
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        double? firstDataAt = null;
+        PhaseResult result = await PhaseRunner.RunAsync(
+            Options(TestDirection.Download, "throughput/v1/download", streams: 2, extra: [new("slowfirst", "1500")]),
+            (_, mbps) =>
+            {
+                if (mbps > 0 && firstDataAt is null)
+                {
+                    firstDataAt = sw.Elapsed.TotalSeconds;
+                }
+            },
+            CancellationToken.None);
+
+        Assert.Equal(2, result.StreamsConnected);
+        Assert.NotNull(firstDataAt);
+        Assert.True(firstDataAt < 1.0, $"first data reported at {firstDataAt:0.00} s, after the slow stream's 1.5 s delay");
+    }
+
+    [Theory]
+    [InlineData(TestDirection.Download)]
+    [InlineData(TestDirection.Upload)]
+    public async Task Phase_closed_before_any_data_is_server_unavailable(TestDirection direction)
+    {
+        PhaseOptions options = Options(direction, "empty", streams: 2);
+        ServerUnavailableException ex = await Assert.ThrowsAsync<ServerUnavailableException>(
+            () => PhaseRunner.RunAsync(options, null, CancellationToken.None));
+        Assert.Contains("before any data", ex.Message, StringComparison.Ordinal);
+    }
+
+    private PhaseOptions Options(TestDirection direction, string path, int streams, double seconds = 1.2, KeyValuePair<string, string>[]? extra = null) => new()
     {
         Protocol = MlabProtocol.Msak,
         Direction = direction,
@@ -107,7 +140,7 @@ public sealed class PhaseRunnerLoopbackTests : IAsyncDisposable
         Duration = TimeSpan.FromSeconds(seconds),
         WarmupSeconds = 0.2,
         UserAgent = "netspeed-tests/1.0",
-        Query = [new("streams", streams.ToString(System.Globalization.CultureInfo.InvariantCulture)), new("duration", "1200")],
+        Query = [new("streams", streams.ToString(System.Globalization.CultureInfo.InvariantCulture)), new("duration", "1200"), .. extra ?? []],
         ConnectTimeout = TimeSpan.FromSeconds(5),
     };
 
@@ -139,13 +172,24 @@ public sealed class PhaseRunnerLoopbackTests : IAsyncDisposable
             return;
         }
 
+        if (context.Request.QueryString["slowfirst"] is string slow && Interlocked.Increment(ref _slowSeen) == 1)
+        {
+            await Task.Delay(int.Parse(slow, System.Globalization.CultureInfo.InvariantCulture));
+        }
+
         HttpListenerWebSocketContext ws = await context.AcceptWebSocketAsync(MlabProtocol.Msak.SubProtocol);
         int id = Interlocked.Increment(ref _connections);
         double seconds = int.Parse(context.Request.QueryString["duration"]!, System.Globalization.CultureInfo.InvariantCulture) / 1000d;
         using WebSocket socket = ws.WebSocket;
         try
         {
-            if (path.EndsWith("/download", StringComparison.Ordinal))
+            if (path == "/empty")
+            {
+                // Upgrade, then close at once without sending or reading any payload.
+                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Bye", CancellationToken.None);
+                await DrainAsync(socket);
+            }
+            else if (path.EndsWith("/download", StringComparison.Ordinal))
             {
                 await ServeDownloadAsync(socket, id, seconds);
             }
